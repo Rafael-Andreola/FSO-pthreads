@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <windows.h>
 #include <pthread.h>
+// #include <Python.h>
 
 #define NUM_LINHAS_POR_THREAD 1000000
 
@@ -14,16 +15,33 @@ typedef struct {
 void* processArchive(void* args)
 {
     ArchiveReaderParam* param = (ArchiveReaderParam*) args;
+
+    // Py_Initialize();
+    // PyRun_SimpleString("print('Olá do Python!')");
+    // Py_Finalize();
+
     printf("Thread %d -> Inicio: %d | Nro: %d\n", param->threadNum, param->start, param->nlinhas);
 }
 
-void process(DWORD numThreads){
+int CountLines(FILE *file)
+{
+    int contador = 0;
+    char linha[1024];
+
+    while (fgets(linha, sizeof(linha), file)) {
+        contador++;
+    }
+
+    printf("Numero de linhas: %d \n", contador);
+
+    return contador;
+}
+
+void processWin32(DWORD numThreads){
     pthread_t thread[numThreads];
     ArchiveReaderParam param[numThreads + 1];
 
     FILE *arquivo = NULL;
-    int contador = 0;
-    char linha[1024];
 
     arquivo = fopen("data/devices.csv", "r");
 
@@ -32,43 +50,37 @@ void process(DWORD numThreads){
         return;
     }
 
-    while (fgets(linha, sizeof(linha), arquivo)) {
-        contador++;
-    }
+    int lines = CountLines(arquivo);
+    
+    lines--; //tirando o header
 
-    contador--; //tirando o header
-
-    int ultimaThread = (contador) % ((int)numThreads- 1);
-
+    int ultimaThread = (lines) % ((int)numThreads);
     int linhasPorThread = 0;
-
-    boolean isExactly = ultimaThread;
 
     if(ultimaThread == 0)
     {
-
+        linhasPorThread = (lines) / ((int)numThreads);
+        ultimaThread = linhasPorThread;
     }
     else{
+        linhasPorThread = (lines) / ((int)numThreads- 1);
+        ultimaThread = (lines) % ((int)numThreads - 1);
     }
     
-    linhasPorThread = (contador) / ((int)numThreads - 1);
-    
-    for(int i = 0; i < numThreads; i++)
+    for(int i = 0; i < (int)numThreads; i++)
     {
-        if(i < numThreads - 1)
+        param[i].file = arquivo;
+        param[i].threadNum = i +1;
+        param[i].start = linhasPorThread * i;
+
+        if(i == numThreads -1)
         {
-            param[i].start = linhasPorThread * i;
-            param[i].nlinhas = linhasPorThread;
-            param[i].file = arquivo;
-            param[i].threadNum = i +1;
+            param[i].nlinhas = ultimaThread;
         }
         else{
-            param[i].start = linhasPorThread * i;
-            param[i].nlinhas = ultimaThread;
-            param[i].file = arquivo;
-            param[i].threadNum = i +1;
+            param[i].nlinhas = linhasPorThread;
         }
-        
+
         pthread_create(&thread[0], NULL, processArchive, &param[i]);
     }
 
@@ -79,7 +91,7 @@ void process(DWORD numThreads){
     
     fclose(arquivo);
 
-    printf("Num de linhas %d\n", contador);
+    printf("Num de linhas %d\n", lines);
     printf("Thread finalizada\n");
 
     return;
@@ -92,7 +104,7 @@ void executeInWin32()
 	
     printf("Numero de processadores logicos: %u\n", sysinfo.dwNumberOfProcessors);
 	
-	process(sysinfo.dwNumberOfProcessors);
+	processWin32(sysinfo.dwNumberOfProcessors);
     return;
 }
 
