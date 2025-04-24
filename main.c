@@ -2,19 +2,22 @@
 #include <windows.h>
 #include <pthread.h>
 
+
+#define MAX_LINE 1024
+#define TAM_DEVICE 50
+#define TAM_DATA   30
+
 typedef struct {
     int start;
     int nlinhas;
     int threadNum;
 } ArchiveReaderParam;
 
-#define MAX_LINE 1024
-
 typedef struct {
     int id;
-    char device[50];
+    char device[TAM_DEVICE];
     int contagem;
-    char data[20];
+    char data[TAM_DATA];
     float temperatura;
     float umidade;
     float luminosidade;
@@ -25,47 +28,80 @@ typedef struct {
     double longitude;
 } Registro;
 
-Registro MapRegistro(char *token)
+void limpar_registro(Registro *r) {
+    r->id = 0;
+    strcpy(r->device, "");
+    r->contagem = 0;
+    strcpy(r->data, "");
+    r->temperatura = 0.0;
+    r->umidade = 0.0;
+    r->luminosidade = 0.0;
+    r->ruido = 0.0;
+    r->eco2 = 0;
+    r->etvoc = 0;
+    r->latitude = 0.0;
+    r->longitude = 0.0;
+}
+
+Registro MapRegistro(char *linha)
 {
     Registro r;
+    limpar_registro(&r);  // Preenche os campos com valores "vazios"
 
-    printf("%s", token);
-
-    // r.id = atoi(token);
-    // token = strtok(NULL, "|");
-    // strcpy(r.device, token);
-
-    // token = strtok(NULL, "|");
-    // r.contagem = atoi(token);
-
-    // token = strtok(NULL, "|");
-    // strcpy(r.data, token);
-
-    // token = strtok(NULL, "|");
-    // r.temperatura = atof(token);
-
-    // token = strtok(NULL, "|");
-    // r.umidade = atof(token);
-
-    // token = strtok(NULL, "|");
-    // r.luminosidade = atof(token);
-
-    // token = strtok(NULL, "|");
-    // r.ruido = atof(token);
-
-    // token = strtok(NULL, "|");
-    // r.eco2 = atoi(token);
-
-    // token = strtok(NULL, "|");
-    // r.etvoc = atoi(token);
-
-    // token = strtok(NULL, "|");
-    // r.latitude = atof(token);
-
-    // token = strtok(NULL, "|");
-    // r.longitude = atof(token);
-
+    int campo = 0;
+    char *token = strtok(linha, "|\n");
+    while (token != NULL) {
+        if (strlen(token) > 0) {
+            switch (campo) {
+                case 0: r.id = atoi(token); break;
+                case 1: strcpy(r.device, token); break;
+                case 2: r.contagem = atoi(token); break;
+                case 3: strcpy(r.data, token); break;
+                case 4: r.temperatura = atof(token); break;
+                case 5: r.umidade = atof(token); break;
+                case 6: r.luminosidade = atof(token); break;
+                case 7: r.ruido = atof(token); break;
+                case 8: r.eco2 = atoi(token); break;
+                case 9: r.etvoc = atoi(token); break;
+                case 10: r.latitude = atof(token); break;
+                case 11: r.longitude = atof(token); break;
+            }
+        }
+        campo++;
+        token = strtok(NULL, "|\n");
+    }
+    
     return r;
+}
+
+void salvar_registros_binario(const char *nome_arquivo, Registro *registros, size_t total) {
+
+    char archive[30];
+    sprintf(archive, "Data/%s", nome_arquivo);
+
+    FILE *fp = fopen(archive, "wb");
+
+    if (!fp) {
+        perror("Erro ao criar arquivo binário");
+        return;
+    }
+
+    for (size_t i = 0; i < total; i++) {
+        fwrite(&registros[i].id, sizeof(int), 1, fp);
+        fwrite(&registros[i].device, sizeof(char), TAM_DEVICE, fp);
+        fwrite(&registros[i].contagem, sizeof(int), 1, fp);
+        fwrite(&registros[i].data, sizeof(char), TAM_DATA, fp);
+        fwrite(&registros[i].temperatura, sizeof(float), 1, fp);
+        fwrite(&registros[i].umidade, sizeof(float), 1, fp);
+        fwrite(&registros[i].luminosidade, sizeof(float), 1, fp);
+        fwrite(&registros[i].ruido, sizeof(float), 1, fp);
+        fwrite(&registros[i].eco2, sizeof(int), 1, fp);
+        fwrite(&registros[i].etvoc, sizeof(int), 1, fp);
+        fwrite(&registros[i].latitude, sizeof(double), 1, fp);
+        fwrite(&registros[i].longitude, sizeof(double), 1, fp);
+    }
+
+    fclose(fp);
 }
 
 void* processArchive(void* args)
@@ -81,7 +117,6 @@ void* processArchive(void* args)
     }
 
     char linha[1024];
-    int capacidade = param->nlinhas;
 
     for (int i = 0; i < param->start; i++) {
         if (fgets(linha, sizeof(linha), file) == NULL) {
@@ -90,20 +125,29 @@ void* processArchive(void* args)
             return NULL;
         }
     }
-    fgets(linha, sizeof(linha), file);
-    
-    // Registro registros[capacidade];
 
-    for(int total = 0; total < param->nlinhas; total++)
+    Registro *registros = malloc(param->nlinhas * sizeof(Registro));
+    clock_t inicio = clock();
+
+    int total = 0;
+
+    for(total = 0; total < param->nlinhas; total++)
     {
-        printf("%s", linha);
-        char *token = strtok(linha, "|");
-
-        // registros[total] = MapRegistro(token);
-        // printf("%d - %s", registros[total].id, registros[total].device);
         fgets(linha, sizeof(linha), file);
+        registros[total] = MapRegistro(linha);
     }
+
+    clock_t fim = clock();
+
     fclose(file);
+
+    double tempo = (double)(fim - inicio) / CLOCKS_PER_SEC;
+    printf("Thread %d: Tempo de execucao: %.4f segundos -> Numero de registros: %d\n", param->threadNum, tempo, total);
+
+    char archiveName[30];
+    sprintf(archiveName, "registros_%d.bin", param->threadNum);
+
+    salvar_registros_binario(archiveName , registros, total);
 
     return NULL;
 }

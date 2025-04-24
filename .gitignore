@@ -53,3 +53,5 @@ dkms.conf
 
 *.zip
 Data/devices.csv
+*.txt
+*.bin
