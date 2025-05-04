@@ -1,267 +1,246 @@
 #include <stdio.h>
-#include <windows.h>
+#include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
+#include <windows.h>
+#include <ctype.h>
+#include <sys/stat.h>
+#include <direct.h>
 
+#define MAX_LINE 512
+#define MAX_RECORDS 7000000
+#define MAX_DEVICE_LEN 64
+#define NUM_SENSORS 6
+#define OUTPUT_DIR "./Data/output/"
+#define OUTPUT_FILE "resultado.csv"
 
-#define MAX_LINE 1024
-#define TAM_DEVICE 50
-#define TAM_DATA   30
+const char *sensor_names[NUM_SENSORS] = {"temperatura", "umidade", "luminosidade", "ruido", "eco2", "etvoc"};
 
 typedef struct {
-    int start;
-    int nlinhas;
-    int threadNum;
-} ArchiveReaderParam;
-
-typedef struct {
-    int id;
-    char device[TAM_DEVICE];
-    int contagem;
-    char data[TAM_DATA];
-    float temperatura;
-    float umidade;
-    float luminosidade;
-    float ruido;
-    int eco2;
-    int etvoc;
-    double latitude;
-    double longitude;
+    char device[MAX_DEVICE_LEN];
+    int year, month;
+    float sensors[NUM_SENSORS];
 } Registro;
 
-void limpar_registro(Registro *r) {
-    r->id = 0;
-    strcpy(r->device, "");
-    r->contagem = 0;
-    strcpy(r->data, "");
-    r->temperatura = 0.0;
-    r->umidade = 0.0;
-    r->luminosidade = 0.0;
-    r->ruido = 0.0;
-    r->eco2 = 0;
-    r->etvoc = 0;
-    r->latitude = 0.0;
-    r->longitude = 0.0;
+typedef struct {
+    char device[MAX_DEVICE_LEN];
+    int year, month;
+    float min[NUM_SENSORS];
+    float max[NUM_SENSORS];
+    float sum[NUM_SENSORS];
+    int count;
+} Resultado;
+
+Registro *registros;
+int total_registros = 0;
+int num_threads;
+Resultado *resultados;
+int resultado_count = 0;
+pthread_mutex_t resultado_mutex;
+
+int get_num_coresWIn32() {
+    SYSTEM_INFO sysinfo;
+    GetSystemInfo(&sysinfo);
+    return sysinfo.dwNumberOfProcessors;
 }
 
-Registro MapRegistro(char *linha)
-{
-    Registro r;
-    limpar_registro(&r);  // Preenche os campos com valores "vazios"
+int parse_data(const char *data, int *year, int *month) {
+    return sscanf(data, "%d-%d", year, month);
+}
 
-    int campo = 0;
-    char *token = strtok(linha, "|\n");
-    while (token != NULL) {
-        if (strlen(token) > 0) {
-            switch (campo) {
-                case 0: r.id = atoi(token); break;
-                case 1: strcpy(r.device, token); break;
-                case 2: r.contagem = atoi(token); break;
-                case 3: strcpy(r.data, token); break;
-                case 4: r.temperatura = atof(token); break;
-                case 5: r.umidade = atof(token); break;
-                case 6: r.luminosidade = atof(token); break;
-                case 7: r.ruido = atof(token); break;
-                case 8: r.eco2 = atoi(token); break;
-                case 9: r.etvoc = atoi(token); break;
-                case 10: r.latitude = atof(token); break;
-                case 11: r.longitude = atof(token); break;
+void carregar_csv(const char *filepath) {
+    FILE *file = fopen(filepath, "r");
+    if (!file) {
+        perror("Erro ao abrir CSV");
+        exit(1);
+    }
+    registros = malloc(sizeof(Registro) * MAX_RECORDS);
+    char linha[MAX_LINE];
+    int linha_count = 0;
+
+    while (fgets(linha, MAX_LINE, file)) {
+        linha_count++;
+        if (linha_count == 1) continue; //Pula o cabecalho
+
+        char *token = strtok(linha, "|");
+        int col = 0;
+        Registro r;
+        int incluir = 0;
+        memset(&r, 0, sizeof(Registro));
+
+        while (token) {
+                switch (col) {
+                    case 1: strncpy(r.device, token, MAX_DEVICE_LEN); break;
+                    case 3:
+                        if (parse_data(token, &r.year, &r.month) &&
+                            (r.year > 2024 || (r.year == 2024 && r.month >= 3))) {
+                            incluir = 1;
+                        }
+                        break;
+                    case 4: r.sensors[0] = atof(token); break;
+                    case 5: r.sensors[1] = atof(token); break;
+                    case 6: r.sensors[2] = atof(token); break;
+                    case 7: r.sensors[3] = atof(token); break;
+                    case 8: r.sensors[4] = atof(token); break;
+                    case 9: r.sensors[5] = atof(token); break;
+            }
+            token = strtok(NULL, "|");
+            col++;
+        }
+
+        if (incluir && strlen(r.device) > 0) {
+            registros[total_registros++] = r;
+        }
+    }
+    fclose(file);
+    printf("Total de registros carregados: %d\n", total_registros);
+}
+
+// Verifica se resultado existe e retorna índice, ou -1
+int encontrar_resultado(const char *device, int year, int month) {
+    for (int i = 0; i < resultado_count; i++) {
+        if (strcmp(resultados[i].device, device) == 0 &&
+            resultados[i].year == year &&
+            resultados[i].month == month) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void *processar(void *arg) {
+    clock_t clock_inicio = clock();
+
+    int tid = *(int *)arg;
+
+    int blocos = total_registros / num_threads;
+    int inicio = tid * blocos;
+    int fim = (tid == num_threads - 1) ? total_registros : inicio + blocos;
+
+    printf("Thread %d processando de %d a %d\n", tid, inicio, fim);
+
+    for (int i = inicio; i < fim; i++) {
+        Registro *r = &registros[i];
+        pthread_mutex_lock(&resultado_mutex);
+
+        int idx = encontrar_resultado(r->device, r->year, r->month);
+
+        if (idx == -1) {
+            idx = resultado_count++;
+            strncpy(resultados[idx].device, r->device, MAX_DEVICE_LEN);
+            resultados[idx].year = r->year;
+            resultados[idx].month = r->month;
+            resultados[idx].count = 0;
+
+            for (int j = 0; j < NUM_SENSORS; j++) {
+                resultados[idx].min[j] = r->sensors[j];
+                resultados[idx].max[j] = r->sensors[j];
+                resultados[idx].sum[j] = 0;
             }
         }
-        campo++;
-        token = strtok(NULL, "|\n");
-    }
-    
-    return r;
-}
 
-void salvar_registros_binario(const char *nome_arquivo, Registro *registros, size_t total) {
-
-    char archive[30];
-    sprintf(archive, "Data/%s", nome_arquivo);
-
-    FILE *fp = fopen(archive, "wb");
-
-    if (!fp) {
-        perror("Erro ao criar arquivo binário");
-        return;
-    }
-
-    for (size_t i = 0; i < total; i++) {
-        fwrite(&registros[i].id, sizeof(int), 1, fp);
-        fwrite(&registros[i].device, sizeof(char), TAM_DEVICE, fp);
-        fwrite(&registros[i].contagem, sizeof(int), 1, fp);
-        fwrite(&registros[i].data, sizeof(char), TAM_DATA, fp);
-        fwrite(&registros[i].temperatura, sizeof(float), 1, fp);
-        fwrite(&registros[i].umidade, sizeof(float), 1, fp);
-        fwrite(&registros[i].luminosidade, sizeof(float), 1, fp);
-        fwrite(&registros[i].ruido, sizeof(float), 1, fp);
-        fwrite(&registros[i].eco2, sizeof(int), 1, fp);
-        fwrite(&registros[i].etvoc, sizeof(int), 1, fp);
-        fwrite(&registros[i].latitude, sizeof(double), 1, fp);
-        fwrite(&registros[i].longitude, sizeof(double), 1, fp);
-    }
-
-    fclose(fp);
-}
-
-void* processArchive(void* args)
-{
-    ArchiveReaderParam* param = (ArchiveReaderParam*) args;
-    printf("Thread %d -> Inicio: %d | Nro: %d\n", param->threadNum, param->start, param->nlinhas);
-    
-    FILE *file = fopen("data/devices.txt", "r");
-
-    if (!file) {
-        perror("Erro ao abrir o arquivo\n");
-        return NULL;
-    }
-
-    char linha[1024];
-
-    for (int i = 0; i < param->start; i++) {
-        if (fgets(linha, sizeof(linha), file) == NULL) {
-            fprintf(stderr, "%d - Arquivo tem menos de %d linhas! %s\n",i, param->start, linha);
-            fclose(file);
-            return NULL;
+        for (int j = 0; j < NUM_SENSORS; j++) {
+            if (r->sensors[j] < resultados[idx].min[j]) resultados[idx].min[j] = r->sensors[j];
+            if (r->sensors[j] > resultados[idx].max[j]) resultados[idx].max[j] = r->sensors[j];
+            resultados[idx].sum[j] += r->sensors[j];
         }
+        resultados[idx].count++;
+        pthread_mutex_unlock(&resultado_mutex);
     }
 
-    Registro *registros = malloc(param->nlinhas * sizeof(Registro));
-    clock_t inicio = clock();
+    clock_t clock_fim = clock();
 
-    int total = 0;
-
-    for(total = 0; total < param->nlinhas; total++)
-    {
-        fgets(linha, sizeof(linha), file);
-        registros[total] = MapRegistro(linha);
-    }
-
-    clock_t fim = clock();
-
-    fclose(file);
-
-    double tempo = (double)(fim - inicio) / CLOCKS_PER_SEC;
-    printf("Thread %d: Tempo de execucao: %.4f segundos -> Numero de registros: %d\n", param->threadNum, tempo, total);
-
-    char archiveName[30];
-    sprintf(archiveName, "registros_%d.bin", param->threadNum);
-
-    salvar_registros_binario(archiveName , registros, total);
+    double tempo = (double)(clock_fim - clock_inicio) / CLOCKS_PER_SEC;
+    printf("Thread %d: Tempo de execucao: %.4f segundos\n", tid, tempo);
 
     return NULL;
 }
 
-int CountLines()
-{
-    FILE *file = NULL;
+void salvar_csvs() {
+    mkdir("./Data");
+    mkdir(OUTPUT_DIR);
 
-    file = fopen("data/devices.txt", "r");
+    FILE *out = fopen(OUTPUT_FILE, "w");
 
-    if (file == NULL) {
-        printf("Erro ao abrir o arquivo.\n");
-        return 0;
+    if (!out) {
+        perror("Erro ao criar arquivo resultado.csv");
+        exit(1);
     }
+    fprintf(out, "device|ano-mes|sensor|valor_maximo|valor_medio|valor_minimo|quantidade_registros\n");
 
-    int contador = 0;
-    char linha[MAX_LINE];
+    for (int i = 0; i < resultado_count; i++) {
+        Resultado *res = &resultados[i];
+        char filename[256];
+        snprintf(filename, sizeof(filename), "%s%s.csv", OUTPUT_DIR, res->device);
 
-    while (fgets(linha, sizeof(linha), file)) {
-        contador++;
+        FILE *devfile = fopen(filename, "a");
+        if (!devfile) {
+            perror("Erro ao criar arquivo por dispositivo");
+            continue;
+        }
+
+        for (int j = 0; j < NUM_SENSORS; j++) {
+            float media = res->sum[j] / res->count;
+
+            fprintf(out, "%s|%04d-%02d|%s|%.2f|%.2f|%.2f|%d\n",
+                    res->device, res->year, res->month, sensor_names[j],
+                    res->max[j], media, res->min[j], res->count);
+
+            fprintf(devfile, "%04d-%02d|%s|%.2f|%.2f|%.2f|%d\n",
+                    res->year, res->month, sensor_names[j],
+                    res->max[j], media, res->min[j], res->count);
+        }
+
+        fclose(devfile);
     }
+    fclose(out);
 
-    printf("Numero de linhas: %d \n", contador);
-    fclose(file);
-
-    return contador;
+    printf("Arquivo resultado.csv e arquivos por dispositivo foram gerados na pasta %s\n", OUTPUT_DIR);
 }
 
-void processWin32(DWORD numThreads){
-    pthread_t thread[numThreads];
-    ArchiveReaderParam param[numThreads + 1];
+void execute(int num_threads)
+{   
+    printf("Utilizando %d threads.\n", num_threads);
 
-    int lines = CountLines();
+    carregar_csv("./Data/devices.csv");
 
-    if(lines == 0)
-    {
-        return;
-    }
-    
-    lines--; //tirando o header
+    pthread_t threads[num_threads];
+    int thread_ids[num_threads];
 
-    int ultimaThread = (lines) % ((int)numThreads);
-    int linhasPorThread = 0;
+    resultados = malloc(sizeof(Resultado) * total_registros);
+    pthread_mutex_init(&resultado_mutex, NULL);
 
-    if(ultimaThread == 0)
-    {
-        linhasPorThread = (lines) / ((int)numThreads);
-        ultimaThread = linhasPorThread;
-    }
-    else{
-        linhasPorThread = (lines) / ((int)numThreads- 1);
-        ultimaThread = (lines) % ((int)numThreads - 1);
-    }
-    
-    for(int i = 0; i < (int)numThreads; i++)
-    {
-        param[i].threadNum = i +1;
-
-        if(i == 0)
-        {
-            param[i].start = 1;
-        }
-        else
-        {
-            param[i].start = (linhasPorThread * i);
-        }
-        
-        if(i == numThreads -1)
-        {
-            param[i].nlinhas = ultimaThread;
-        }
-        else{
-            param[i].nlinhas = linhasPorThread;
-        }
-
-        pthread_create(&thread[0], NULL, processArchive, &param[i]);
+    for (int i = 0; i < num_threads; i++) {
+        thread_ids[i] = i;
+        pthread_create(&threads[i], NULL, processar, &thread_ids[i]);
     }
 
-    for(int i = 0; i < numThreads; i++)
-    {
-        pthread_join(thread[i], NULL);
+    for (int i = 0; i < num_threads; i++) {
+        pthread_join(threads[i], NULL);
     }
-    
 
-    printf("Num de linhas %d\n", lines);
-    printf("Thread finalizada\n");
+    salvar_csvs();
 
-    return;
-}
+    free(registros);
+    free(resultados);
 
-void executeInWin32()
-{
-    SYSTEM_INFO sysinfo;
-    GetSystemInfo(&sysinfo);
-    printf("Numero de processadores logicos: %u\n", sysinfo.dwNumberOfProcessors);
-	
-	processWin32(sysinfo.dwNumberOfProcessors);
-
-    return;
-}
-
-void processBySO()
-{
-    #if defined(_WIN32)
-    	executeInWin32();
-    #elif defined(__linux__)
-    #endif
+    pthread_mutex_destroy(&resultado_mutex);
 
     return;
 }
 
 int main() {
+    printf("Iniciando processamento...\n");
 
-    processBySO();
+    int num_threads = 0;
 
+    #if defined(_WIN32)
+    num_threads = get_num_coresWIn32();
+    #elif defined(__linux__)
+    #endif
+
+    execute(num_threads);
+
+    printf("Processamento finalizado.\n");
     return 0;
 }
