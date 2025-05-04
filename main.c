@@ -38,7 +38,7 @@ Resultado *resultados;
 int resultado_count = 0;
 pthread_mutex_t resultado_mutex;
 
-int get_num_coresWIn32() {
+int get_num_cores() {
     SYSTEM_INFO sysinfo;
     GetSystemInfo(&sysinfo);
     return sysinfo.dwNumberOfProcessors;
@@ -60,7 +60,7 @@ void carregar_csv(const char *filepath) {
 
     while (fgets(linha, MAX_LINE, file)) {
         linha_count++;
-        if (linha_count == 1) continue; //Pula o cabecalho
+        if (linha_count == 1) continue; // pular o cabeçalho
 
         char *token = strtok(linha, "|");
         int col = 0;
@@ -159,9 +159,8 @@ void *processar(void *arg) {
 void salvar_csvs() {
     mkdir("./Data");
     mkdir(OUTPUT_DIR);
-
     FILE *out = fopen(OUTPUT_FILE, "w");
-
+    
     if (!out) {
         perror("Erro ao criar arquivo resultado.csv");
         exit(1);
@@ -190,7 +189,6 @@ void salvar_csvs() {
                     res->year, res->month, sensor_names[j],
                     res->max[j], media, res->min[j], res->count);
         }
-
         fclose(devfile);
     }
     fclose(out);
@@ -198,8 +196,10 @@ void salvar_csvs() {
     printf("Arquivo resultado.csv e arquivos por dispositivo foram gerados na pasta %s\n", OUTPUT_DIR);
 }
 
-void execute(int num_threads)
-{   
+void executeInWin32()
+{
+    num_threads = get_num_cores();
+    
     printf("Utilizando %d threads.\n", num_threads);
 
     carregar_csv("./Data/devices.csv");
@@ -207,7 +207,7 @@ void execute(int num_threads)
     pthread_t threads[num_threads];
     int thread_ids[num_threads];
 
-    resultados = malloc(sizeof(Resultado) * total_registros);
+    resultados = malloc(sizeof(Resultado) * total_registros); // superestimado, mas seguro
     pthread_mutex_init(&resultado_mutex, NULL);
 
     for (int i = 0; i < num_threads; i++) {
@@ -232,14 +232,10 @@ void execute(int num_threads)
 int main() {
     printf("Iniciando processamento...\n");
 
-    int num_threads = 0;
-
     #if defined(_WIN32)
-    num_threads = get_num_coresWIn32();
+    	executeInWin32();
     #elif defined(__linux__)
     #endif
-
-    execute(num_threads);
 
     printf("Processamento finalizado.\n");
     return 0;

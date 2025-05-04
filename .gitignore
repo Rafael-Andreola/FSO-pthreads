@@ -57,3 +57,5 @@ Data/devices.csv
 *.bin
 Data/devices_mqtt_20250402/devices.csv
 .vscode/launch.json
+Data/output/*
+resultado.csv
